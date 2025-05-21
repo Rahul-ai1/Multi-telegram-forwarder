@@ -1,0 +1,10 @@
+modules = ["python-3.11"]
+
+[nix]
+channel = "stable-24_05"
+packages = ["openssl"]
+
+[workflows]
+
+[deployment]
+run = ["sh", "-c", "pip install telethon python-dotenv && cp .env.example .env && chmod +x start.sh && ./start.sh"]
