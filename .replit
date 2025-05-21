@@ -5,6 +5,24 @@ channel = "stable-24_05"
 packages = ["openssl"]
 
 [workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "TelegramBot"
+
+[[workflows.workflow]]
+name = "TelegramBot"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python telegram_forwarder.py"
 
 [deployment]
 run = ["sh", "-c", "pip install telethon python-dotenv && cp .env.example .env && chmod +x start.sh && ./start.sh"]

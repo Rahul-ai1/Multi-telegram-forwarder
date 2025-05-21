@@ -129,7 +129,54 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        # For non-async entry point, we don't use asyncio.run
+        # Create the client and start it
+        client = TelegramClient('forwarder_session', API_ID, API_HASH)
+        
+        # Register event handler for messages
+        @client.on(events.NewMessage(chats=f"@{SOURCE_CHANNEL}"))
+        async def handler(event):
+            """Handle new messages from the source channel"""
+            message = event.message
+            text = message.text or ""
+            
+            try:
+                edited_text = process_text(text)
+                
+                logger.info(f"Processing message: {text[:30]}{'...' if len(text) > 30 else ''}")
+                
+                if message.media:
+                    await client.send_file(
+                        f"@{TARGET_CHANNEL}",
+                        file=message.media,
+                        caption=edited_text if edited_text else ""
+                    )
+                    logger.info("Forwarded media message with edited caption")
+                else:
+                    if edited_text:
+                        await client.send_message(f"@{TARGET_CHANNEL}", edited_text)
+                        logger.info("Forwarded text message with edits")
+                    
+            except ChannelPrivateError:
+                logger.error(f"Cannot access the target channel @{TARGET_CHANNEL}. Make sure the bot is a member.")
+            except ChatAdminRequiredError:
+                logger.error(f"Bot needs admin rights in the target channel @{TARGET_CHANNEL} to send messages.")
+            except FloodWaitError as e:
+                logger.warning(f"Rate limit exceeded. Waiting for {e.seconds} seconds before retrying.")
+            except Exception as e:
+                logger.error(f"Error forwarding message: {e}", exc_info=True)
+        
+        logger.info("Starting Telegram Forwarder Bot...")
+        logger.info(f"Monitoring source channel: @{SOURCE_CHANNEL}")
+        logger.info(f"Forwarding to target channel: @{TARGET_CHANNEL}")
+        logger.info(f"Referral link being used: {REFERRAL_LINK}")
+        
+        # Start the client
+        client.start(bot_token=BOT_TOKEN)
+        logger.info("Bot successfully connected to Telegram!")
+        
+        # Run the client until disconnected
+        client.run_until_disconnected()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
