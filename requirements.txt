@@ -2,3 +2,5 @@ telethon==1.29.2
 python-dotenv==1.0.0
 python-dotenv
 telethon
+Flask
+requests

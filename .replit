@@ -22,7 +22,11 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python telegram_forwarder.py"
+args = "python main.py"
 
 [deployment]
 run = ["sh", "-c", "pip install telethon python-dotenv && cp .env.example .env && chmod +x start.sh && ./start.sh"]
+
+[[ports]]
+localPort = 8080
+externalPort = 80
