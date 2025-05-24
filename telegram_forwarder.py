@@ -15,6 +15,7 @@ from telethon.errors import ChannelPrivateError, ChatAdminRequiredError, FloodWa
 from dotenv import load_dotenv
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
+from telethon.tl.types import MessageEntityBold, MessageEntityItalic, MessageEntityCode, MessageEntityPre  # common entity types
 
 # Flask keep-alive server
 app = Flask('')
@@ -57,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 
-# URL regex pattern (for backup, though we mainly rely on entities)
+# URL regex pattern (backup to catch URLs not marked by entities)
 URL_PATTERN = re.compile(r'https?://\S+')
 
 # Mapping source_channel -> (target_channel, referral_link)
@@ -84,12 +85,26 @@ def remove_urls_and_adjust_entities(text, entities):
             if isinstance(ent, (MessageEntityTextUrl, MessageEntityUrl)):
                 url_spans.append((ent.offset, ent.offset + ent.length))
 
-    # Remove URLs from text in reverse order (to keep indices correct)
+    # Also catch URLs not marked by entities (rare but possible)
+    # We only remove URLs in text that are not covered by entities (to avoid double removal)
+    covered_spans = set()
+    for start, end in url_spans:
+        covered_spans.update(range(start, end))
+
+    # Find URLs in text using regex that are NOT covered by entities
+    for match in URL_PATTERN.finditer(text):
+        start, end = match.span()
+        if not any(pos in covered_spans for pos in range(start, end)):
+            url_spans.append((start, end))
+
+    # Sort spans reverse so we remove from end to start without messing up indices
+    url_spans = sorted(url_spans, key=lambda x: x[0], reverse=True)
+
     cleaned_text = text
-    for start, end in sorted(url_spans, reverse=True):
+    for start, end in url_spans:
         cleaned_text = cleaned_text[:start] + cleaned_text[end:]
 
-    # Adjust other entities offsets according to removed text
+    # Adjust entities after removals
     adjusted_entities = []
     for ent in entities or []:
         # Skip URL entities because we removed their text
@@ -114,14 +129,18 @@ def remove_urls_and_adjust_entities(text, entities):
             if new_length <= 0:
                 continue
 
-        # Clone entity with updated offset and length
-        new_ent = ent
-        new_ent.offset = new_offset
-        new_ent.length = new_length
+        # Clone entity with updated offset and length - entities are immutable, create new instance
+        # We do this by copying all fields but updating offset and length
+        new_ent = type(ent)(
+            offset=new_offset,
+            length=new_length,
+            **{k: getattr(ent, k) for k in ent.__slots__ if k not in ('offset', 'length')}
+        )
         adjusted_entities.append(new_ent)
 
     cleaned_text = cleaned_text.strip()
-    return cleaned_text, adjusted_entities
+    return cleaned_text if cleaned_text else None, adjusted_entities if adjusted_entities else None
+
 
 async def send_preserving_entities(client, target, message, referral_link, reply_to_id=None):
     """
@@ -133,9 +152,11 @@ async def send_preserving_entities(client, target, message, referral_link, reply
 
     cleaned_text, adjusted_entities = remove_urls_and_adjust_entities(text, entities)
 
-    # Append referral link plain text below original text
+    # Build the full text cleanly with referral link appended
     if cleaned_text:
-        full_text = cleaned_text + f"\n\nRegister: {referral_link}"
+        # Ensure no trailing spaces or newlines at end of cleaned_text
+        cleaned_text = cleaned_text.rstrip()
+        full_text = f"{cleaned_text}\n\nRegister: {referral_link}"
     else:
         full_text = f"Register: {referral_link}"
 
@@ -147,6 +168,7 @@ async def send_preserving_entities(client, target, message, referral_link, reply
         parse_mode=None
     )
     return sent_msg
+
 
 @client.on(events.NewMessage(chats=[f"@{c}" for c in SOURCE_CHANNELS]))
 async def handler(event):
@@ -168,13 +190,13 @@ async def handler(event):
             reply_to_id = msg_id_map.get(message.reply_to_msg_id)
 
         if message.media:
-            # Process caption similarly preserving formatting & entities
+            # For media, process caption similarly preserving formatting & entities
             caption = message.text or message.message or ""
             caption_entities = message.entities
             cleaned_caption, adjusted_caption_entities = remove_urls_and_adjust_entities(caption, caption_entities)
 
             if cleaned_caption:
-                caption_full = cleaned_caption + f"\n\nRegister: {referral}"
+                caption_full = f"{cleaned_caption.rstrip()}\n\nRegister: {referral}"
             else:
                 caption_full = f"Register: {referral}"
 
@@ -201,7 +223,7 @@ async def handler(event):
         logger.warning(f"Flood wait for {e.seconds} seconds.")
         await asyncio.sleep(e.seconds)
     except Exception as e:
-        logger.error(f"Error while forwarding message: {e}", exc_info=True)
+        logger.error(f"Error while forwarding message from @{source}: {e}", exc_info=True)
 
 async def main():
     logger.info("Starting Telegram userbot...")
