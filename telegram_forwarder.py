@@ -15,7 +15,7 @@ from telethon.errors import ChannelPrivateError, ChatAdminRequiredError, FloodWa
 from dotenv import load_dotenv
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
-from telethon.tl.types import MessageEntityBold, MessageEntityItalic, MessageEntityCode, MessageEntityPre  # common entity types
+from telethon.tl.types import MessageEntityBold, MessageEntityItalic, MessageEntityCode, MessageEntityPre
 
 # Flask keep-alive server
 app = Flask('')
@@ -58,60 +58,45 @@ logger = logging.getLogger(__name__)
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 
-# URL regex pattern (backup to catch URLs not marked by entities)
 URL_PATTERN = re.compile(r'https?://\S+')
 
-# Mapping source_channel -> (target_channel, referral_link)
 channel_map = {
     SOURCE_CHANNELS[i]: (TARGET_CHANNELS[i], REFERRAL_LINKS[i])
     for i in range(len(SOURCE_CHANNELS))
 }
 
-# In-memory message ID mapping for reply chaining
 msg_id_map = {}
 
 def remove_urls_and_adjust_entities(text, entities):
-    """
-    Remove URLs from text and adjust entities to preserve formatting & emojis.
-    Removes entities corresponding to URLs and adjusts offsets of others.
-    """
     if not text:
         return None, None
 
-    # Collect URL spans from entities
     url_spans = []
     if entities:
         for ent in entities:
             if isinstance(ent, (MessageEntityTextUrl, MessageEntityUrl)):
                 url_spans.append((ent.offset, ent.offset + ent.length))
 
-    # Also catch URLs not marked by entities (rare but possible)
-    # We only remove URLs in text that are not covered by entities (to avoid double removal)
     covered_spans = set()
     for start, end in url_spans:
         covered_spans.update(range(start, end))
 
-    # Find URLs in text using regex that are NOT covered by entities
     for match in URL_PATTERN.finditer(text):
         start, end = match.span()
         if not any(pos in covered_spans for pos in range(start, end)):
             url_spans.append((start, end))
 
-    # Sort spans reverse so we remove from end to start without messing up indices
     url_spans = sorted(url_spans, key=lambda x: x[0], reverse=True)
 
     cleaned_text = text
     for start, end in url_spans:
         cleaned_text = cleaned_text[:start] + cleaned_text[end:]
 
-    # Adjust entities after removals
     adjusted_entities = []
     for ent in entities or []:
-        # Skip URL entities because we removed their text
         if isinstance(ent, (MessageEntityTextUrl, MessageEntityUrl)):
             continue
 
-        # Calculate how many characters removed before this entity's offset
         removed_before = 0
         for start, end in url_spans:
             if start < ent.offset:
@@ -119,18 +104,14 @@ def remove_urls_and_adjust_entities(text, entities):
 
         new_offset = ent.offset - removed_before
         if new_offset < 0:
-            # Entity completely removed or shifted out of range
             continue
 
-        # Adjust length if entity goes beyond new text length
         new_length = ent.length
         if new_offset + new_length > len(cleaned_text):
             new_length = len(cleaned_text) - new_offset
             if new_length <= 0:
                 continue
 
-        # Clone entity with updated offset and length - entities are immutable, create new instance
-        # We do this by copying all fields but updating offset and length
         new_ent = type(ent)(
             offset=new_offset,
             length=new_length,
@@ -141,34 +122,64 @@ def remove_urls_and_adjust_entities(text, entities):
     cleaned_text = cleaned_text.strip()
     return cleaned_text if cleaned_text else None, adjusted_entities if adjusted_entities else None
 
+def entities_to_markdown(text, entities):
+    """
+    Simple converter from Telegram entities to Markdown formatting.
+    This is optional but useful to preserve formatting since 'entities' param is not accepted.
+    Note: This converter supports only common entities; you can expand it if needed.
+    """
+    if not entities:
+        return text
+
+    # Sort entities by offset descending to not mess up indices when inserting markdown
+    entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+
+    for ent in entities:
+        start = ent.offset
+        end = start + ent.length
+        substring = text[start:end]
+
+        if isinstance(ent, MessageEntityBold):
+            md = f"**{substring}**"
+        elif isinstance(ent, MessageEntityItalic):
+            md = f"*{substring}*"
+        elif isinstance(ent, MessageEntityCode):
+            md = f"`{substring}`"
+        elif isinstance(ent, MessageEntityPre):
+            md = f"```\n{substring}\n```"
+        elif isinstance(ent, MessageEntityTextUrl):
+            md = f"[{substring}]({ent.url})"
+        elif isinstance(ent, MessageEntityUrl):
+            md = f"[{substring}]({substring})"
+        else:
+            # For unsupported entities, leave text as is
+            md = substring
+
+        text = text[:start] + md + text[end:]
+
+    return text
 
 async def send_preserving_entities(client, target, message, referral_link, reply_to_id=None):
-    """
-    Send message text/media preserving formatting & emojis,
-    removing URLs and appending referral link.
-    """
     text = message.text or message.message or ""
     entities = message.entities
 
     cleaned_text, adjusted_entities = remove_urls_and_adjust_entities(text, entities)
 
-    # Build the full text cleanly with referral link appended
     if cleaned_text:
-        # Ensure no trailing spaces or newlines at end of cleaned_text
         cleaned_text = cleaned_text.rstrip()
-        full_text = f"{cleaned_text}\n\nRegister: {referral_link}"
+        # Convert entities to markdown to preserve formatting
+        md_text = entities_to_markdown(cleaned_text, adjusted_entities)
+        full_text = f"{md_text}\n\nRegister: {referral_link}"
     else:
         full_text = f"Register: {referral_link}"
 
     sent_msg = await client.send_message(
         target,
         full_text,
-        entities=adjusted_entities,
         reply_to=reply_to_id,
-        parse_mode=None
+        parse_mode='md'  # Use markdown to preserve formatting
     )
     return sent_msg
-
 
 @client.on(events.NewMessage(chats=[f"@{c}" for c in SOURCE_CHANNELS]))
 async def handler(event):
@@ -190,13 +201,13 @@ async def handler(event):
             reply_to_id = msg_id_map.get(message.reply_to_msg_id)
 
         if message.media:
-            # For media, process caption similarly preserving formatting & entities
             caption = message.text or message.message or ""
             caption_entities = message.entities
             cleaned_caption, adjusted_caption_entities = remove_urls_and_adjust_entities(caption, caption_entities)
 
             if cleaned_caption:
-                caption_full = f"{cleaned_caption.rstrip()}\n\nRegister: {referral}"
+                md_caption = entities_to_markdown(cleaned_caption.rstrip(), adjusted_caption_entities)
+                caption_full = f"{md_caption}\n\nRegister: {referral}"
             else:
                 caption_full = f"Register: {referral}"
 
@@ -204,8 +215,8 @@ async def handler(event):
                 f"@{target}",
                 file=message.media,
                 caption=caption_full,
-                caption_entities=adjusted_caption_entities,
-                reply_to=reply_to_id
+                reply_to=reply_to_id,
+                parse_mode='md'  # Markdown for caption formatting
             )
             logger.info(f"Forwarded media message from @{source} to @{target} preserving formatting")
         else:
