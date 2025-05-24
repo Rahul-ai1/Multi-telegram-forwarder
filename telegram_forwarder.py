@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Telegram Userbot Channel Forwarder
-
-Monitors a source channel using a user session,
-removes links, adds a referral, and forwards to a target channel.
-Handles reply chaining and preserves formatting.
+Telegram Userbot Channel Forwarder with multiple source-target pairs and referral links.
+Preserves formatting, emojis, and entities while removing URLs and appending referral links.
 """
 
 from flask import Flask
@@ -17,8 +14,9 @@ from telethon import TelegramClient, events
 from telethon.errors import ChannelPrivateError, ChatAdminRequiredError, FloodWaitError
 from dotenv import load_dotenv
 from telethon.sessions import StringSession
+from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
 
-# Flask server to keep Replit alive
+# Flask keep-alive server
 app = Flask('')
 
 @app.route('/')
@@ -29,123 +27,193 @@ def run():
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-    t = Thread(target=run)
-    t.start()
+    Thread(target=run).start()
 
 # Load environment variables
 load_dotenv()
 
-# Set up logging
+API_ID = int(os.getenv("TELEGRAM_API_ID", "28490021"))
+API_HASH = os.getenv("TELEGRAM_API_HASH", "e01e2bf792f3dc911ad7a8a760bfa613")
+STRING_SESSION = os.getenv("STRING_SESSION", None)
+
+SOURCE_CHANNELS = [c.strip().lstrip('@') for c in os.getenv("SOURCE_CHANNELS", "").split(",") if c.strip()]
+TARGET_CHANNELS = [c.strip().lstrip('@') for c in os.getenv("TARGET_CHANNELS", "").split(",") if c.strip()]
+REFERRAL_LINKS = [r.strip() for r in os.getenv("REFERRAL_LINKS", "").split(",") if r.strip()]
+
+# Validation
+if not STRING_SESSION:
+    print("ERROR: STRING_SESSION not set in .env")
+    exit(1)
+
+if not (len(SOURCE_CHANNELS) == len(TARGET_CHANNELS) == len(REFERRAL_LINKS)):
+    print("ERROR: SOURCE_CHANNELS, TARGET_CHANNELS and REFERRAL_LINKS counts must be equal.")
+    exit(1)
+
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Telegram credentials (User session, no bot token!)
-API_ID = int(os.getenv("TELEGRAM_API_ID", "28490021"))
-API_HASH = os.getenv("TELEGRAM_API_HASH", "e01e2bf792f3dc911ad7a8a760bfa613")
+client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 
-# Channels and referral
-SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "besttrade7555").lstrip('@')
-TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "Ram_Earning_club").lstrip('@')
-REFERRAL_LINK = os.getenv("REFERRAL_LINK", "https://www.dreamwingo.in/#/register?invitationCode=26372407203")
+# URL regex pattern (for backup, though we mainly rely on entities)
+URL_PATTERN = re.compile(r'https?://\S+')
 
-# URL removal regex
-URL_PATTERN = re.compile(r'(https?://\S+)')
+# Mapping source_channel -> (target_channel, referral_link)
+channel_map = {
+    SOURCE_CHANNELS[i]: (TARGET_CHANNELS[i], REFERRAL_LINKS[i])
+    for i in range(len(SOURCE_CHANNELS))
+}
 
-# In-memory map of source_msg_id → target_msg_id
+# In-memory message ID mapping for reply chaining
 msg_id_map = {}
 
-def process_text(text):
-    """Removes URLs and appends referral link."""
+def remove_urls_and_adjust_entities(text, entities):
+    """
+    Remove URLs from text and adjust entities to preserve formatting & emojis.
+    Removes entities corresponding to URLs and adjusts offsets of others.
+    """
     if not text:
-        return None
-    text = URL_PATTERN.sub('', text).strip()
-    if text:
-        text += f"\n\nRegister: {REFERRAL_LINK}"
-    return text
+        return None, None
 
-async def main():
-    STRING_SESSION = os.getenv("STRING_SESSION", None)
-    if not STRING_SESSION:
-        logger.error("No STRING_SESSION found in environment. Please set it in .env")
-        exit(1)
+    # Collect URL spans from entities
+    url_spans = []
+    if entities:
+        for ent in entities:
+            if isinstance(ent, (MessageEntityTextUrl, MessageEntityUrl)):
+                url_spans.append((ent.offset, ent.offset + ent.length))
 
-    client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+    # Remove URLs from text in reverse order (to keep indices correct)
+    cleaned_text = text
+    for start, end in sorted(url_spans, reverse=True):
+        cleaned_text = cleaned_text[:start] + cleaned_text[end:]
 
-    @client.on(events.NewMessage(chats=f"@{SOURCE_CHANNEL}"))
-    async def handler(event):
-        message = event.message
-        text = message.text or message.message or ""
-        reply_to = message.reply_to_msg_id
+    # Adjust other entities offsets according to removed text
+    adjusted_entities = []
+    for ent in entities or []:
+        # Skip URL entities because we removed their text
+        if isinstance(ent, (MessageEntityTextUrl, MessageEntityUrl)):
+            continue
 
-        logger.info(f"New message received: {text[:30]}{'...' if len(text) > 30 else ''}")
+        # Calculate how many characters removed before this entity's offset
+        removed_before = 0
+        for start, end in url_spans:
+            if start < ent.offset:
+                removed_before += (end - start)
 
-        try:
-            edited_text = process_text(text)
+        new_offset = ent.offset - removed_before
+        if new_offset < 0:
+            # Entity completely removed or shifted out of range
+            continue
 
-            # Safe snippet for logging processed text
-            if edited_text:
-                snippet = edited_text[:30] + ("..." if len(edited_text) > 30 else "")
-            else:
-                snippet = "None"
-            logger.info(f"Processed text: {snippet}")
+        # Adjust length if entity goes beyond new text length
+        new_length = ent.length
+        if new_offset + new_length > len(cleaned_text):
+            new_length = len(cleaned_text) - new_offset
+            if new_length <= 0:
+                continue
 
-            # Try to map reply in target channel
-            target_reply_id = None
-            if reply_to and reply_to in msg_id_map:
-                target_reply_id = msg_id_map[reply_to]
+        # Clone entity with updated offset and length
+        new_ent = ent
+        new_ent.offset = new_offset
+        new_ent.length = new_length
+        adjusted_entities.append(new_ent)
 
-            # Forward media or text with reply
-            if message.media:
-                sent = await client.send_file(
-                    f"@{TARGET_CHANNEL}",
-                    file=message.media,
-                    caption=edited_text or "",
-                    reply_to=target_reply_id
-                )
-                logger.info("Forwarded media message with reply and caption")
-            else:
-                if edited_text:
-                    sent = await client.send_message(
-                        f"@{TARGET_CHANNEL}",
-                        edited_text,
-                        reply_to=target_reply_id
-                    )
-                    logger.info("Forwarded text message with reply")
+    cleaned_text = cleaned_text.strip()
+    return cleaned_text, adjusted_entities
 
-            # Save source → target message ID mapping
-            if sent:
-                msg_id_map[message.id] = sent.id
-                logger.info(f"Mapped source_msg_id {message.id} → target_msg_id {sent.id}")
+async def send_preserving_entities(client, target, message, referral_link, reply_to_id=None):
+    """
+    Send message text/media preserving formatting & emojis,
+    removing URLs and appending referral link.
+    """
+    text = message.text or message.message or ""
+    entities = message.entities
 
-        except ChannelPrivateError:
-            logger.error(f"Cannot access the target channel @{TARGET_CHANNEL}. Make sure you're a member.")
-        except ChatAdminRequiredError:
-            logger.error(f"User needs admin rights in the target channel @{TARGET_CHANNEL}.")
-        except FloodWaitError as e:
-            logger.warning(f"Rate limit exceeded. Waiting {e.seconds} seconds.")
-            await asyncio.sleep(e.seconds)
-        except Exception as e:
-            logger.error(f"Error forwarding message: {e}", exc_info=True)
+    cleaned_text, adjusted_entities = remove_urls_and_adjust_entities(text, entities)
+
+    # Append referral link plain text below original text
+    if cleaned_text:
+        full_text = cleaned_text + f"\n\nRegister: {referral_link}"
+    else:
+        full_text = f"Register: {referral_link}"
+
+    sent_msg = await client.send_message(
+        target,
+        full_text,
+        entities=adjusted_entities,
+        reply_to=reply_to_id,
+        parse_mode=None
+    )
+    return sent_msg
+
+@client.on(events.NewMessage(chats=[f"@{c}" for c in SOURCE_CHANNELS]))
+async def handler(event):
+    message = event.message
+    chat = await event.get_chat()
+    source = chat.username or str(chat.id)
+
+    preview_text = (message.text or "")[:30]
+    logger.info(f"Message received from @{source}: {preview_text}{'...' if len(message.text or '') > 30 else ''}")
+
+    target, referral = channel_map.get(source, (None, None))
+    if not target:
+        logger.warning(f"No target mapping found for source @{source}")
+        return
 
     try:
-        logger.info("Starting Telegram Userbot...")
-        logger.info(f"Monitoring source channel: @{SOURCE_CHANNEL}")
-        logger.info(f"Forwarding to target channel: @{TARGET_CHANNEL}")
-        logger.info(f"Referral link being used: {REFERRAL_LINK}")
+        reply_to_id = None
+        if message.reply_to_msg_id:
+            reply_to_id = msg_id_map.get(message.reply_to_msg_id)
 
-        keep_alive()
-        await client.start()
-        logger.info("Userbot successfully connected to Telegram!")
-        await client.run_until_disconnected()
+        if message.media:
+            # Process caption similarly preserving formatting & entities
+            caption = message.text or message.message or ""
+            caption_entities = message.entities
+            cleaned_caption, adjusted_caption_entities = remove_urls_and_adjust_entities(caption, caption_entities)
 
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+            if cleaned_caption:
+                caption_full = cleaned_caption + f"\n\nRegister: {referral}"
+            else:
+                caption_full = f"Register: {referral}"
+
+            sent_msg = await client.send_file(
+                f"@{target}",
+                file=message.media,
+                caption=caption_full,
+                caption_entities=adjusted_caption_entities,
+                reply_to=reply_to_id
+            )
+            logger.info(f"Forwarded media message from @{source} to @{target} preserving formatting")
+        else:
+            sent_msg = await send_preserving_entities(client, f"@{target}", message, referral, reply_to_id)
+            logger.info(f"Forwarded text message from @{source} to @{target} preserving formatting")
+
+        if sent_msg:
+            msg_id_map[message.id] = sent_msg.id
+
+    except ChannelPrivateError:
+        logger.error(f"Cannot access target channel @{target}. Check membership and permissions.")
+    except ChatAdminRequiredError:
+        logger.error(f"User needs admin rights in the target channel @{target}.")
+    except FloodWaitError as e:
+        logger.warning(f"Flood wait for {e.seconds} seconds.")
+        await asyncio.sleep(e.seconds)
     except Exception as e:
-        logger.error(f"Unhandled exception: {e}", exc_info=True)
+        logger.error(f"Error while forwarding message: {e}", exc_info=True)
 
-# Run the main function
+async def main():
+    logger.info("Starting Telegram userbot...")
+    logger.info(f"Monitoring source channels: {SOURCE_CHANNELS}")
+    logger.info(f"Forwarding to target channels: {TARGET_CHANNELS}")
+    logger.info(f"Using referral links: {REFERRAL_LINKS}")
+
+    keep_alive()
+
+    await client.start()
+    logger.info("Userbot connected to Telegram!")
+    await client.run_until_disconnected()
+
 if __name__ == "__main__":
     asyncio.run(main())
