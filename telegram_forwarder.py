@@ -2,6 +2,8 @@
 """
 Telegram Userbot Channel Forwarder with multiple source-target pairs and referral links.
 Preserves formatting, emojis, and entities while removing URLs and appending referral links.
+
+Now supports private target channels by using channel IDs (no '@' prefix).
 """
 
 from flask import Flask
@@ -14,8 +16,11 @@ from telethon import TelegramClient, events
 from telethon.errors import ChannelPrivateError, ChatAdminRequiredError, FloodWaitError
 from dotenv import load_dotenv
 from telethon.sessions import StringSession
-from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
-from telethon.tl.types import MessageEntityBold, MessageEntityItalic, MessageEntityCode, MessageEntityPre
+from telethon.tl.types import (
+    MessageEntityTextUrl, MessageEntityUrl,
+    MessageEntityBold, MessageEntityItalic,
+    MessageEntityCode, MessageEntityPre
+)
 
 # Flask keep-alive server
 app = Flask('')
@@ -37,8 +42,8 @@ API_ID = int(os.getenv("TELEGRAM_API_ID", "28490021"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "e01e2bf792f3dc911ad7a8a760bfa613")
 STRING_SESSION = os.getenv("STRING_SESSION", None)
 
-SOURCE_CHANNELS = [c.strip().lstrip('@') for c in os.getenv("SOURCE_CHANNELS", "").split(",") if c.strip()]
-TARGET_CHANNELS = [c.strip().lstrip('@') for c in os.getenv("TARGET_CHANNELS", "").split(",") if c.strip()]
+SOURCE_CHANNELS = [c.strip() for c in os.getenv("SOURCE_CHANNELS", "").split(",") if c.strip()]
+TARGET_CHANNELS = [c.strip() for c in os.getenv("TARGET_CHANNELS", "").split(",") if c.strip()]
 REFERRAL_LINKS = [r.strip() for r in os.getenv("REFERRAL_LINKS", "").split(",") if r.strip()]
 
 # Validation
@@ -125,13 +130,10 @@ def remove_urls_and_adjust_entities(text, entities):
 def entities_to_markdown(text, entities):
     """
     Simple converter from Telegram entities to Markdown formatting.
-    This is optional but useful to preserve formatting since 'entities' param is not accepted.
-    Note: This converter supports only common entities; you can expand it if needed.
     """
     if not entities:
         return text
 
-    # Sort entities by offset descending to not mess up indices when inserting markdown
     entities = sorted(entities, key=lambda e: e.offset, reverse=True)
 
     for ent in entities:
@@ -152,7 +154,6 @@ def entities_to_markdown(text, entities):
         elif isinstance(ent, MessageEntityUrl):
             md = f"[{substring}]({substring})"
         else:
-            # For unsupported entities, leave text as is
             md = substring
 
         text = text[:start] + md + text[end:]
@@ -167,7 +168,6 @@ async def send_preserving_entities(client, target, message, referral_link, reply
 
     if cleaned_text:
         cleaned_text = cleaned_text.rstrip()
-        # Convert entities to markdown to preserve formatting
         md_text = entities_to_markdown(cleaned_text, adjusted_entities)
         full_text = f"{md_text}\n\nRegister: {referral_link}"
     else:
@@ -177,22 +177,22 @@ async def send_preserving_entities(client, target, message, referral_link, reply
         target,
         full_text,
         reply_to=reply_to_id,
-        parse_mode='md'  # Use markdown to preserve formatting
+        parse_mode='md'
     )
     return sent_msg
 
-@client.on(events.NewMessage(chats=[f"@{c}" for c in SOURCE_CHANNELS]))
+@client.on(events.NewMessage(chats=SOURCE_CHANNELS))
 async def handler(event):
     message = event.message
     chat = await event.get_chat()
     source = chat.username or str(chat.id)
 
     preview_text = (message.text or "")[:30]
-    logger.info(f"Message received from @{source}: {preview_text}{'...' if len(message.text or '') > 30 else ''}")
+    logger.info(f"Message received from {source}: {preview_text}{'...' if len(message.text or '') > 30 else ''}")
 
     target, referral = channel_map.get(source, (None, None))
     if not target:
-        logger.warning(f"No target mapping found for source @{source}")
+        logger.warning(f"No target mapping found for source {source}")
         return
 
     try:
@@ -212,29 +212,35 @@ async def handler(event):
                 caption_full = f"Register: {referral}"
 
             sent_msg = await client.send_file(
-                f"@{target}",
+                target,
                 file=message.media,
                 caption=caption_full,
                 reply_to=reply_to_id,
-                parse_mode='md'  # Markdown for caption formatting
+                parse_mode='md'
             )
-            logger.info(f"Forwarded media message from @{source} to @{target} preserving formatting")
+            logger.info(f"Forwarded media message from {source} to {target} preserving formatting")
         else:
-            sent_msg = await send_preserving_entities(client, f"@{target}", message, referral, reply_to_id)
-            logger.info(f"Forwarded text message from @{source} to @{target} preserving formatting")
+            sent_msg = await send_preserving_entities(client, target, message, referral, reply_to_id)
+            logger.info(f"Forwarded text message from {source} to {target} preserving formatting")
 
         if sent_msg:
             msg_id_map[message.id] = sent_msg.id
 
     except ChannelPrivateError:
-        logger.error(f"Cannot access target channel @{target}. Check membership and permissions.")
+        logger.error(f"Cannot access target channel {target}. Check membership and permissions.")
     except ChatAdminRequiredError:
-        logger.error(f"User needs admin rights in the target channel @{target}.")
+        logger.error(f"User needs admin rights in the target channel {target}.")
     except FloodWaitError as e:
         logger.warning(f"Flood wait for {e.seconds} seconds.")
         await asyncio.sleep(e.seconds)
     except Exception as e:
-        logger.error(f"Error while forwarding message from @{source}: {e}", exc_info=True)
+        logger.error(f"Error while forwarding message from {source}: {e}", exc_info=True)
+
+# Uncomment the following handler to print chat info to get channel IDs (run once)
+# @client.on(events.NewMessage())
+# async def print_chat_id(event):
+#     chat = await event.get_chat()
+#     logger.info(f"Chat: {chat.title} ID: {chat.id} Username: {chat.username}")
 
 async def main():
     logger.info("Starting Telegram userbot...")
