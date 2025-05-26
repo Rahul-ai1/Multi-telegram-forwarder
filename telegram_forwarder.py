@@ -120,7 +120,7 @@ def remove_urls_and_adjust_entities(text, entities):
         new_ent = type(ent)(
             offset=new_offset,
             length=new_length,
-            **{k: getattr(ent, k) for k in ent.__slots__ if k not in ('offset', 'length')}
+            **{k: v for k, v in vars(ent).items() if k not in ('offset', 'length')}
         )
         adjusted_entities.append(new_ent)
 
