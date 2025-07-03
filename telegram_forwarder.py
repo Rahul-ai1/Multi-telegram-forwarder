@@ -200,10 +200,10 @@ async def handler(event):
         if message.reply_to_msg_id:
             reply_to_id = msg_id_map.get(message.reply_to_msg_id)
 
-        if message.media:
-                if message.file and message.file.size > 5 * 1024 * 1024:
-                    logger.info(f"⏩ Skipped media > 5MB from {source} to ensure real-time performance.")
-                    return
+        if message.media:          
+            if message.file and message.file.size > 5 * 1024 * 1024:
+                logger.info(f"⏩ Skipped media > 5MB from {source} to ensure real-time performance.")
+                return
             caption = message.text or message.message or ""
             caption_entities = message.entities
             cleaned_caption, adjusted_caption_entities = remove_urls_and_adjust_entities(caption, caption_entities)
@@ -214,13 +214,24 @@ async def handler(event):
             else:
                 caption_full = f"Register: {referral}"
 
-            sent_msg = await client.send_file(
-                target,
-                file=message.media,
-                caption=caption_full,
-                reply_to=reply_to_id,
-                parse_mode='md'
-            )
+            try:
+                
+                # Set timeout (e.g., 5 seconds)
+                sent_msg = await asyncio.wait_for(
+                    client.send_file(
+                    target,
+                    file=message.media,
+                    caption=caption_full,
+                    reply_to=reply_to_id,
+                    parse_mode='md'
+                    ),
+                    timeout=5  # seconds
+                 )
+            logger.info(f"✅ Forwarded media from {source} to {target}")
+            except asyncio.TimeoutError:
+                logger.warning(f"⚠️ Skipped delayed media message from {source} (took >5s to upload)")
+                return
+
             logger.info(f"Forwarded media message from {source} to {target} preserving formatting")
         else:
             sent_msg = await send_preserving_entities(client, target, message, referral, reply_to_id)
