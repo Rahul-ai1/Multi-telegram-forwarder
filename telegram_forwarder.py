@@ -213,26 +213,22 @@ async def handler(event):
                 caption_full = f"{md_caption}\n\nRegister: {referral}"
             else:
                 caption_full = f"Register: {referral}"
-
             try:
-                
-                # Set timeout (e.g., 5 seconds)
                 sent_msg = await asyncio.wait_for(
                     client.send_file(
-                    target,
-                    file=message.media,
-                    caption=caption_full,
-                    reply_to=reply_to_id,
-                    parse_mode='md'
+                        target,
+                        file=message.media,
+                        caption=caption_full,
+                        reply_to=reply_to_id,
+                        parse_mode='md'
                     ),
                     timeout=5  # seconds
-                 )
-            logger.info(f"✅ Forwarded media from {source} to {target}")
+                )
+                logger.info(f"✅ Forwarded media from {source} to {target}")
             except asyncio.TimeoutError:
                 logger.warning(f"⚠️ Skipped delayed media message from {source} (took >5s to upload)")
                 return
 
-            logger.info(f"Forwarded media message from {source} to {target} preserving formatting")
         else:
             sent_msg = await send_preserving_entities(client, target, message, referral, reply_to_id)
             logger.info(f"Forwarded text message from {source} to {target} preserving formatting")
