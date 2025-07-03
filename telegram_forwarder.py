@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
+
 """
 Telegram Userbot Channel Forwarder with multiple source-target pairs and referral links.
 Preserves formatting, emojis, and entities while removing URLs and appending referral links.
-Now supports private/public target channels by using channel IDs or usernames.
+
+Now supports private target channels by using channel IDs (no '@' prefix).
 """
 
 from flask import Flask
@@ -11,7 +12,6 @@ import os
 import re
 import logging
 import asyncio
-import tempfile
 from telethon import TelegramClient, events
 from telethon.errors import ChannelPrivateError, ChatAdminRequiredError, FloodWaitError
 from dotenv import load_dotenv
@@ -128,6 +128,9 @@ def remove_urls_and_adjust_entities(text, entities):
     return cleaned_text if cleaned_text else None, adjusted_entities if adjusted_entities else None
 
 def entities_to_markdown(text, entities):
+    """
+    Simple converter from Telegram entities to Markdown formatting.
+    """
     if not entities:
         return text
 
@@ -198,11 +201,9 @@ async def handler(event):
             reply_to_id = msg_id_map.get(message.reply_to_msg_id)
 
         if message.media:
-            # Skip large videos
-            if message.file and message.file.size > 49 * 1024 * 1024:
-                logger.warning("Skipped media > 49MB (Telegram limit)")
-                return
-
+                if message.file and message.file.size > 5 * 1024 * 1024:
+                    logger.info(f"⏩ Skipped media > 5MB from {source} to ensure real-time performance.")
+                    return
             caption = message.text or message.message or ""
             caption_entities = message.entities
             cleaned_caption, adjusted_caption_entities = remove_urls_and_adjust_entities(caption, caption_entities)
@@ -213,18 +214,13 @@ async def handler(event):
             else:
                 caption_full = f"Register: {referral}"
 
-            with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                path = await message.download_media(file=tmp.name)
-
             sent_msg = await client.send_file(
                 target,
-                file=path,
+                file=message.media,
                 caption=caption_full,
                 reply_to=reply_to_id,
                 parse_mode='md'
             )
-            os.remove(path)
-
             logger.info(f"Forwarded media message from {source} to {target} preserving formatting")
         else:
             sent_msg = await send_preserving_entities(client, target, message, referral, reply_to_id)
@@ -243,6 +239,12 @@ async def handler(event):
     except Exception as e:
         logger.error(f"Error while forwarding message from {source}: {e}", exc_info=True)
 
+# Uncomment the following handler to print chat info to get channel IDs (run once)
+# @client.on(events.NewMessage())
+# async def print_chat_id(event):
+#     chat = await event.get_chat()
+#     logger.info(f"Chat: {chat.title} ID: {chat.id} Username: {chat.username}")
+
 async def main():
     logger.info("Starting Telegram userbot...")
     logger.info(f"Monitoring source channels: {SOURCE_CHANNELS}")
@@ -250,6 +252,7 @@ async def main():
     logger.info(f"Using referral links: {REFERRAL_LINKS}")
 
     keep_alive()
+
     await client.start()
     logger.info("Userbot connected to Telegram!")
     await client.run_until_disconnected()
